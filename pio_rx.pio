@@ -1,0 +1,66 @@
+
+; UART RX using 1 stop bit, 8 data bits, no parity
+; Assumes 8x oversampling and idle-high line
+
+.pio_version 0
+.program uart_rx 
+; Optional 1-bit side-set for debug 
+.side_set 1             
+
+; Notes:
+; - pin 0 is RX
+; - shift left (MSB last)
+; - autopush after 9 bits (8 data + 1 stop)
+; - requires clkdiv = sys_clk / (baud * 8)
+
+.wrap_target
+    wait 1 pin 0       side 0       ; Wait for line voltage to avoid reading 0x000 forever if nothing connected
+    wait 0 pin 0       side 0       ; Wait for start bit (falling edge)
+    set x, 7           side 1       ; 8 bits to read
+    nop         [3]    side 0       ; Wait ~4 cycles total
+    nop         [4]    side 0       ; Fine-tune to center of bit 0
+
+bitloop:
+    in pins, 1         side 1       ; Sample bit (data bit N)
+    nop         [5]    side 0       ; Wait rest of bit period (7 total cycles since 'in')
+    jmp x-- bitloop    side 0
+
+    nop         [0]   side 0
+    in pins, 1         side 1       ; Sample stop bit
+    push               side 0
+
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void uart_rx_program_init(PIO pio, uint sm, uint offset, uint pin_rx, uint pin_debug, uint baud) {
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_rx, 1, false); // RX input
+    pio_gpio_init(pio, pin_rx);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_debug, 1, true); // Debug output
+    pio_gpio_init(pio, pin_debug);
+
+    pio_sm_config c = uart_rx_program_get_default_config(offset); // matches .program uart_rx
+    sm_config_set_in_shift(&c, true, false, 32); // Shift right, auto-push every 9 bits 8 data + 1 stop // now not
+    sm_config_set_in_pins(&c, pin_rx);
+    sm_config_set_jmp_pin(&c, pin_rx);
+
+    sm_config_set_sideset(&c, 1, false, false); // optional side-set, no pindirs
+    sm_config_set_sideset_pins(&c, pin_debug);
+
+    float div = (float)clock_get_hz(clk_sys) / (8 * baud);
+    sm_config_set_clkdiv(&c, div);
+
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX); //PIO_FIFO_JOIN_RX
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+/*
+static inline int uart_rx_program_get_raw(PIO pio, uint sm, uint32_t *c_out) {
+    if (pio_sm_is_rx_fifo_empty(pio, sm)) return 0;
+    *c_out = (uint32_t)pio_sm_get(pio, sm);
+    return 1;
+}
+*/
+%}
