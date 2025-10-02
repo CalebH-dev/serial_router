@@ -20,6 +20,7 @@ Changed ack and exec success from 91 to 90. Also modified code to
 
 Added printfs on line 834 ish to print uart response buffer.
 
+Set max baud to 115200!!!
 
 Bugs:
 
@@ -357,12 +358,13 @@ int main() {
                         std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart1_tx_buff.begin());
                         ch2_flag = main_rx_index;
                         
-                    }else if(main_rx_buff[0] == (0x80 || 0x88)){
+                    }else if((main_rx_buff[0] == 0x80) || (main_rx_buff[0] == 0x88)){
+
                         printf("Broadcasting\n");
                         std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart0_tx_buff.begin());
-                        uart0_tx_buff[0] = new_settings.ch1_b_id;
+                        uart0_tx_buff[0] = new_settings.ch1_b_id;                                                
                         std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart1_tx_buff.begin());
-                        uart1_tx_buff[0] = new_settings.ch1_b_id;
+                        uart1_tx_buff[0] = new_settings.ch2_b_id;
                         std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, through_tx_buff.begin());
                         ch1_flag = ch2_flag = through_flag = main_rx_index;
 
