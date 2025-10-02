@@ -1,13 +1,15 @@
 /*
 
-uart address resolver v1.1 with debug printfs
+UART address resolver v1.1 with debug printfs
 
-adjust power inq delay. make sure comand is right (make sure byte 0 is right, idk.).
+Accepts baud rates from 300 to 115200.
 
-Make sure Pin assignments are right!!!! Pins 23-25 are n/a
+
+To do:
+
+adjust power inq delay. make sure command is right (make sure byte 0 is right, idk.).
 
 Add check of return values for power on and off.
-
 
 
 Notes:
@@ -16,11 +18,6 @@ set counter in nvs loop to go to main loop if no activity.
 
 Add debug printf for power_inq and on/off for response packets.
 
-Changed ack and exec success from 91 to 90. Also modified code to 
-
-Added printfs on line 834 ish to print uart response buffer.
-
-Set max baud to 115200!!!
 
 Bugs:
 
@@ -108,6 +105,10 @@ constexpr uint MASTER_POWER_SW = 12;
 constexpr size_t BUFF_SIZE = 32;
 constexpr uint MAX_PACKET_QUEUE = 9;
 
+//Timing
+constexpr uint POWER_CAMS_BLINK_TIME = 200;
+constexpr uint NVS_BLINK_TIME = 600;
+
 //Camera power commands
 #define CAM_ACK 0x90, 0x41, 0xff
 #define CAM_EXE_SUCCESS 0x90, 0x51, 0xff
@@ -178,6 +179,7 @@ void pwm_stop(uint pin);
 void print_new_settings_object();
 void set_response_headers();
 bool blink_power_pin(repeating_timer_t *rt);
+void clear_all_inputs_and_outputs();
 
 
 
@@ -185,13 +187,14 @@ bool blink_power_pin(repeating_timer_t *rt);
 int main() {
 
     stdio_init_all();
-    sleep_ms(5000); // Wait for USB serial connection
+    sleep_ms(2000); // Wait for USB serial connection
 
     printf("Init GPIO...\n");
 
     // GPIO initialization
-    for (uint pin : {MASTER_POWER_PIN, ACTIVITY_PIN}) { //ERROR_PIN
+    for (uint pin : {MASTER_POWER_PIN, ACTIVITY_PIN}) { 
         gpio_init(pin);
+        gpio_set_drive_strength(pin, GPIO_DRIVE_STRENGTH_12MA);
         gpio_set_dir(pin, GPIO_OUT);
         gpio_put(pin, 1);
     }
@@ -280,10 +283,9 @@ int main() {
 
     //printf("RS-232 baud rate is %d\n", new_settings.baud_v);
 
-    printf("Scannig for cameras...\n");
+    printf("Scanning for cameras...\n");
 
     // gpio_put(ERROR_PIN, 0);
-    gpio_put(ACTIVITY_PIN, 0);
     gpio_put(MASTER_POWER_PIN, 0);
 
     sleep_ms(1000);
@@ -305,11 +307,13 @@ int main() {
     }
 
     printf("Init Success!\n");
+    gpio_put(ACTIVITY_PIN, 0);
 
     // Non-blocking check
     int c = getchar_timeout_us(0);  // 0 = don’t wait
     if (c != PICO_ERROR_TIMEOUT) {
         printf("Jumping to Setting configuration.\n\n\n");
+        clear_all_inputs_and_outputs();
         goto set_nvs;
     }
 
@@ -515,31 +519,40 @@ int main() {
             gpio_put(ACTIVITY_PIN, 1);
             printf("Changing camera power state\n");
             bool cam_is_on = gpio_get(MASTER_POWER_PIN);
-            add_repeating_timer_ms(500, blink_power_pin, NULL, &power_pin_timer);
+            add_repeating_timer_ms(POWER_CAMS_BLINK_TIME, blink_power_pin, NULL, &power_pin_timer);
 
-            if(!cam_is_on){
+            if(cam_is_on){
                 printf("Powering both cameras off!\n");
-                power_cam_off(uart0);
-                power_cam_off(uart1);
+                bool cam1_ok = power_cam_off(uart0);
+                bool cam2_ok = power_cam_off(uart1);
                 gpio_put(MASTER_POWER_PIN, 0);
-                gpio_put(ACTIVITY_PIN, 0);
+
+                // if(!cam1_ok) printf("Warning: Camera 1 power off failed!\n");
+                // if(!cam2_ok) printf("Warning: Camera 2 power off failed!\n");
+                // gpio_put(MASTER_POWER_PIN, (cam1_ok || cam2_ok) ? 1 : 0);
+
                 while(gpio_debounce(MASTER_POWER_SW, 1)){
                     sleep_ms(100);
                 }
 
             }else{
                 printf("Powering both cameras on!\n");
-                power_cam_on(uart0);
-                power_cam_on(uart1);
-                gpio_put(MASTER_POWER_PIN, 1);
-                gpio_put(ACTIVITY_PIN, 0);
+                bool cam1_ok = power_cam_on(uart0);
+                bool cam2_ok = power_cam_on(uart1);
+                gpio_put(MASTER_POWER_PIN, 0);
+
+                // if(!cam1_ok) printf("Warning: Camera 1 power on failed!\n"); //check if success
+                // if(!cam2_ok) printf("Warning: Camera 2 power on failed!\n");
+                // gpio_put(MASTER_POWER_PIN, (cam1_ok || cam2_ok) ? 1 : 0); //set power light based on response
+                
                 while(gpio_debounce(MASTER_POWER_SW, 1)){
                     sleep_ms(100);
                 }
 
             }
             cancel_repeating_timer(&power_pin_timer);
-            gpio_put(MASTER_POWER_PIN, !cam_is_on);
+            gpio_put(MASTER_POWER_PIN, !cam_is_on); //old method
+            gpio_put(ACTIVITY_PIN, 0);
             printf("done changing camera power.\n");
 
         }
@@ -550,6 +563,7 @@ int main() {
         int c = getchar_timeout_us(0);  // 0 = don’t wait
         if (c != PICO_ERROR_TIMEOUT) {
             printf("Jumping to Setting configuration.\n\n\n");
+            clear_all_inputs_and_outputs();
             goto set_nvs;
             
         }
@@ -563,8 +577,10 @@ int main() {
     while(1){
         gpio_put(ACTIVITY_PIN, 1);
         bool save_is_cam_on_in_nvs = gpio_get(MASTER_POWER_PIN);
-        add_repeating_timer_ms(250, blink_power_pin, NULL, &power_pin_timer);
-
+        add_repeating_timer_ms(NVS_BLINK_TIME, blink_power_pin, NULL, &power_pin_timer);
+        
+        int ch;
+        while ((ch = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT);     //clear garbage from usb buffer
 
         // Wait for USB terminal connection
         int nvs_timout_value = 30;
@@ -668,14 +684,14 @@ int main() {
                 }
                 printf("%d\n", (temp.ch2_b_id & 0x0f));
 
-                printf("    Caution: Baud rate is not fully sanitized! \n");
-                printf("    You have the power to enter non-standard baud rates >=300, but there are no garuntees they will work!\n");
+                printf("    Baud rate can be anything from 300 to 115200.\n");
                 printf("    Enter new Baud rate: ");
                 fgets(buf, sizeof(buf), stdin);
                 if(buf[0] != 'x'){
                     temp.baud_v = atoi(buf);
                 }
                 if(temp.baud_v < 300) temp.baud_v = 300;
+                if(temp.baud_v > 115200) temp.baud_v = 115200;
                 printf("%d\n", temp.baud_v);
 
                 temp.magic_v = SETTINGS_MAGIC;
@@ -909,7 +925,7 @@ int cam_power_inq(uart_inst_t *uart){
             }
             if(response[index] == 0xFF){
                 terminator = 1;
-                printf("if%d: Power inq: Terminator recieved.\n", num);
+                printf("if%d: Power inq: Terminator received.\n", num);
             }
             
             index++;
@@ -929,7 +945,7 @@ int cam_power_inq(uart_inst_t *uart){
 
     if(terminator){
 
-        printf("recieved: ");
+        printf("received: ");
         print_c_array(response, sizeof(response));
         printf("\n");
         
@@ -953,7 +969,7 @@ bool power_cam_on(uart_inst_t *uart){
     uint8_t expected_response[6]={CAM_ACK, CAM_EXE_SUCCESS};
     uart_write_blocking(uart, CAM_ON_CMD, sizeof(CAM_ON_CMD));
     if (uart_read_with_timeout(uart, buf, 6, 10000) == 1 && memcmp(buf, expected_response, 6) == 0) {
-        printf("Powered on, recieved: ");
+        printf("Powered on, received: ");
         print_c_array(buf, sizeof(buf));
         printf("\n");
         return true;
@@ -966,7 +982,7 @@ bool power_cam_off(uart_inst_t *uart){
     uint8_t expected_response[6]={CAM_ACK, CAM_EXE_SUCCESS};
     uart_write_blocking(uart, CAM_OFF_CMD, sizeof(CAM_OFF_CMD));
     if (uart_read_with_timeout(uart, buf, 6, 10000) == 1 && memcmp(buf, expected_response, 6) == 0) {
-        printf("Powered off, recieved: ");
+        printf("Powered off, received: ");
         print_c_array(buf, sizeof(buf));
         printf("\n");
         return true;
@@ -980,7 +996,7 @@ bool power_cam_off(uart_inst_t *uart){
 int gpio_debounce(uint pin, bool normal_state){
     if(gpio_get(pin) != normal_state){
         sleep_ms(20);
-        if(!gpio_get(pin) == normal_state){
+        if(gpio_get(pin) != normal_state){
             return 1;
         }
     }
@@ -1052,19 +1068,19 @@ void pwm_stop(uint pin) {
 
 void print_new_settings_object(){
 
-    printf("\nCurrent settings (user):\n    CH1_ID: %d\n    CH2_ID: %d\n    Baud: %d\n", 
-        (new_settings.addr1_v & 0x0f), (new_settings.addr2_v & 0x0f), new_settings.baud_v);
+    printf("\nCurrent settings:\n    CH1_ID: %d\n    CH2_ID: %d\n    Baud: %d\n", 
+        (new_settings.addr1_v & 0x0f), (new_settings.addr2_v & 0x0f), new_settings.baud_v); // (user)
     printf("    CH1 broadcast ID: %X\n    CH2 broadcast ID: %X\n", (new_settings.ch1_b_id & 0x0f), (new_settings.ch2_b_id & 0x0f));
 
-    printf("Current settings (real):\n    CH1_ID: %X\n    CH2_ID: %X\n    Baud: %d\n", 
-        new_settings.addr1_v, new_settings.addr2_v, new_settings.baud_v);
-    printf("    CH1 broadcast ID: %X\n    CH2 broadcast ID: %X\n\n", new_settings.ch1_b_id, new_settings.ch2_b_id);
+    // printf("Current settings (real):\n    CH1_ID: %X\n    CH2_ID: %X\n    Baud: %d\n", 
+    //     new_settings.addr1_v, new_settings.addr2_v, new_settings.baud_v);
+    // printf("    CH1 broadcast ID: %X\n    CH2 broadcast ID: %X\n\n", new_settings.ch1_b_id, new_settings.ch2_b_id);
 }
 
 void set_response_headers(){
     new_settings.resp_head1 = (new_settings.addr1_v | 0x10) - 1;
     new_settings.resp_head2 = (new_settings.addr2_v | 0x10) - 1;
-    printf("Response IDs: %X, %X", new_settings.resp_head1, new_settings.resp_head2);
+    //printf("Response IDs: %X, %X", new_settings.resp_head1, new_settings.resp_head2);
 
 }
 
@@ -1075,3 +1091,56 @@ bool blink_power_pin(repeating_timer_t *rt) {
     gpio_put(MASTER_POWER_PIN, state);
     return 1; // return true to keep repeating
 }
+
+void clear_all_inputs_and_outputs(){
+    // Clear all receive and transmit buffers before entering config mode
+    main_rx_buff.fill(0);
+    uart0_rx_buff.fill(0);
+    uart1_rx_buff.fill(0);
+    through_rx_buff.fill(0);
+
+    main_tx_buff.fill(0);
+    uart0_tx_buff.fill(0);
+    uart1_tx_buff.fill(0);
+    through_tx_buff.fill(0);
+
+    // Reset all indices
+    main_rx_index = 0;
+    uart0_rx_index = 0;
+    uart1_rx_index = 0;
+    through_rx_index = 0;
+
+    main_tx_index = 0;
+    uart0_tx_index = 0;
+    uart1_tx_index = 0;
+    through_tx_index = 0;
+
+    // Reset all flags
+    main_flag = 0;
+    ch1_flag = 0;
+    ch2_flag = 0;
+    through_flag = 0;
+
+    // Clear response queue
+    queue_head = 0;
+    queue_tail = 0;
+    for (size_t i = 0; i < MAX_PACKET_QUEUE; i++) {
+        memset(main_tx_queue[i].data, 0, BUFF_SIZE);
+        main_tx_queue[i].length = 0;
+    }
+
+    // Flush UART FIFOs
+    while (uart_is_readable(uart0)) uart_getc(uart0);
+    while (uart_is_readable(uart1)) uart_getc(uart1);
+
+    // Flush PIO RX FIFOs
+    while (!pio_sm_is_rx_fifo_empty(pio, 0)) {
+        pio_sm_get(pio, 0);
+    }
+    while (!pio_sm_is_rx_fifo_empty(pio, 2)) {
+        pio_sm_get(pio, 2);
+    }
+
+}
+
+
