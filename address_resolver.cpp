@@ -97,14 +97,12 @@ constexpr uint PIO_RX_PIN1 = 18;
 constexpr uint PIO_DEBUG0 = 10;
 constexpr uint PIO_DEBUG1 = 11;
 
-constexpr uint ERROR_PIN = 20;
-// constexpr uint RECEIVE_PIN = 15;
-// constexpr uint TRANSMIT_PIN = 22;
+// constexpr uint ERROR_PIN = 20;
+constexpr uint ACTIVITY_PIN = 20;
 constexpr uint MASTER_POWER_PIN = 21;
 
 //Switch pins
 constexpr uint MASTER_POWER_SW = 12;   
-constexpr uint NVS_PIN = 13;   
 
 // Protocol addresses
 constexpr size_t BUFF_SIZE = 32;
@@ -192,13 +190,13 @@ int main() {
     printf("Init GPIO...\n");
 
     // GPIO initialization
-    for (uint pin : {ERROR_PIN, MASTER_POWER_PIN}) { //RECEIVE_PIN, TRANSMIT_PIN,
+    for (uint pin : {MASTER_POWER_PIN, ACTIVITY_PIN}) { //ERROR_PIN
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_OUT);
         gpio_put(pin, 1);
     }
 
-    for (uint in_pin : {MASTER_POWER_SW, NVS_PIN}) {
+    for (uint in_pin : {MASTER_POWER_SW}) {
         gpio_init(in_pin);
         gpio_set_dir(in_pin, GPIO_IN);    
         gpio_set_pulls(in_pin, 1, 0);
@@ -284,9 +282,8 @@ int main() {
 
     printf("Scannig for cameras...\n");
 
-    gpio_put(ERROR_PIN, 0);
-    //gpio_put(RECEIVE_PIN, 0);
-    //gpio_put(TRANSMIT_PIN, 0);
+    // gpio_put(ERROR_PIN, 0);
+    gpio_put(ACTIVITY_PIN, 0);
     gpio_put(MASTER_POWER_PIN, 0);
 
     sleep_ms(1000);
@@ -309,17 +306,20 @@ int main() {
 
     printf("Init Success!\n");
 
-    if(gpio_debounce(NVS_PIN, 1)){
-        printf("Jumping to Settings mod loop...\n");
+    // Non-blocking check
+    int c = getchar_timeout_us(0);  // 0 = don’t wait
+    if (c != PICO_ERROR_TIMEOUT) {
+        printf("Jumping to Setting configuration.\n\n\n");
         goto set_nvs;
     }
+
 
     /************************************ Main Loop ****************************************************/
     main_loop:
     while (true) {
 
         if (!pio_sm_is_rx_fifo_empty(pio, 0)) {
-            //gpio_put(RECEIVE_PIN, 1);
+            gpio_put(ACTIVITY_PIN, 1);
 
             
             if (main_rx_index >= BUFF_SIZE) {
@@ -374,9 +374,9 @@ int main() {
                             std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, through_tx_buff.begin());
                             through_flag = main_rx_index;
                         } else {
-                            gpio_put(ERROR_PIN, 1);
+                            // gpio_put(ERROR_PIN, 1);
                             printf("Invalid command from master, addr: 0x%x\n", main_rx_buff[0]);
-                            gpio_put(ERROR_PIN, 0);
+                            // gpio_put(ERROR_PIN, 0);
                         }
                     }
 
@@ -385,13 +385,14 @@ int main() {
                 }
             }
 
-            //gpio_put(RECEIVE_PIN, 0);
+            gpio_put(ACTIVITY_PIN, 0);
 
         }
 
         // Transmit handling
         if (ch1_flag) {
             while (uart_is_writable(uart0) && uart0_tx_index < ch1_flag){
+                gpio_put(ACTIVITY_PIN, 1);
                 uart_putc(uart0, uart0_tx_buff[uart0_tx_index]);
                 printf("if1: sent 0x%X\n", uart0_tx_buff[uart0_tx_index]);
                 uart0_tx_index++;
@@ -406,6 +407,7 @@ int main() {
 
         if (ch2_flag) {
             while (uart_is_writable(uart1) && uart1_tx_index < ch2_flag){
+                gpio_put(ACTIVITY_PIN, 1);
                 uart_putc(uart1, uart1_tx_buff[uart1_tx_index]);
                 printf("if2: sent 0x%X\n", uart1_tx_buff[uart1_tx_index]);
                 uart1_tx_index++;
@@ -418,6 +420,7 @@ int main() {
 
         if (through_flag) {
             while (through_tx_index < through_flag && !pio_sm_is_tx_fifo_full(pio, 3)){
+                gpio_put(ACTIVITY_PIN, 1);
                 pio_sm_put(pio, 3, through_tx_buff[through_tx_index]);
                 printf("if3: sent 0x%X\n", through_tx_buff[through_tx_index]);
                 through_tx_index++;
@@ -431,10 +434,13 @@ int main() {
 
         // Receivee handling 
         get_uart_response(uart0, uart0_rx_buff, uart0_rx_index, "if1");
+        gpio_put(ACTIVITY_PIN, 0);
         get_uart_response(uart1, uart1_rx_buff, uart1_rx_index, "if2");
-        
+        gpio_put(ACTIVITY_PIN, 0);
+
         while (!pio_sm_is_rx_fifo_empty(pio, 2)) { 
 
+            gpio_put(ACTIVITY_PIN, 1);
             if (through_rx_index >= BUFF_SIZE) {
                 printf("if3: buffer overflow, resetting index.\n");
                 through_rx_buff.fill(0);
@@ -481,6 +487,7 @@ int main() {
         //Dequeue package if not already
         if (!main_flag){   
             if (dequeue_packet(main_tx_buff.data(), main_flag)){
+                gpio_put(ACTIVITY_PIN, 1);
                 printf("Dequeued: ");
                 print_array(main_tx_buff, main_flag);
                 printf("\n");
@@ -492,6 +499,7 @@ int main() {
         //Transmit package
         if (main_flag){ 
             while (main_tx_index < (main_flag) && !pio_sm_is_tx_fifo_full(pio, 1) && main_flag){
+                gpio_put(ACTIVITY_PIN, 1);
                 pio_sm_put(pio, 1, main_tx_buff[main_tx_index++]);
             }
 
@@ -504,6 +512,7 @@ int main() {
 
         //master power options
         if(gpio_debounce(MASTER_POWER_SW, 1)){
+            gpio_put(ACTIVITY_PIN, 1);
             printf("Changing camera power state\n");
             bool cam_is_on = gpio_get(MASTER_POWER_PIN);
             add_repeating_timer_ms(500, blink_power_pin, NULL, &power_pin_timer);
@@ -513,6 +522,7 @@ int main() {
                 power_cam_off(uart0);
                 power_cam_off(uart1);
                 gpio_put(MASTER_POWER_PIN, 0);
+                gpio_put(ACTIVITY_PIN, 0);
                 while(gpio_debounce(MASTER_POWER_SW, 1)){
                     sleep_ms(100);
                 }
@@ -522,6 +532,7 @@ int main() {
                 power_cam_on(uart0);
                 power_cam_on(uart1);
                 gpio_put(MASTER_POWER_PIN, 1);
+                gpio_put(ACTIVITY_PIN, 0);
                 while(gpio_debounce(MASTER_POWER_SW, 1)){
                     sleep_ms(100);
                 }
@@ -533,13 +544,16 @@ int main() {
 
         }
     
+        gpio_put(ACTIVITY_PIN, 0);
 
-        if(gpio_debounce(NVS_PIN, 1)){
-            // sleep_ms(2000);
-            // if(gpio_debounce(NVS_PIN, 1)){
-                goto set_nvs;
-            // }
+        // Non-blocking check
+        int c = getchar_timeout_us(0);  // 0 = don’t wait
+        if (c != PICO_ERROR_TIMEOUT) {
+            printf("Jumping to Setting configuration.\n\n\n");
+            goto set_nvs;
+            
         }
+
     }
 
 
@@ -547,7 +561,7 @@ int main() {
     /*********************************** Set NVS loop ***************************************************/
     set_nvs:
     while(1){
-
+        gpio_put(ACTIVITY_PIN, 1);
         bool save_is_cam_on_in_nvs = gpio_get(MASTER_POWER_PIN);
         add_repeating_timer_ms(250, blink_power_pin, NULL, &power_pin_timer);
 
@@ -602,6 +616,8 @@ int main() {
         }
         set_response_headers();
         print_new_settings_object();
+
+        gpio_put(ACTIVITY_PIN, 0);
                 
         char buf[64];
         
@@ -611,6 +627,7 @@ int main() {
             clear_newline(buf);
 
             if (strcmp(buf, "edit") == 0) {
+                gpio_put(ACTIVITY_PIN, 1);
                 settings_object temp = new_settings;
                 printf("edit\n");
 
@@ -692,6 +709,7 @@ int main() {
                 }
 
             }else if(strcmp(buf, "exit") == 0){
+                gpio_put(ACTIVITY_PIN, 1);
                 printf("Retured to normal operation\n\n\n");
                 cancel_repeating_timer(&power_pin_timer);
                 sleep_ms(100);
@@ -699,10 +717,12 @@ int main() {
                 goto main_loop;
 
             }else if (strcmp(buf, "update") == 0) {
+                gpio_put(ACTIVITY_PIN, 1);
                 printf("Rebooting into bootloader...\n");
                 sleep_ms(500);
                 reset_usb_boot(0, 0);
             }else if (strcmp(buf, "default") == 0){
+                gpio_put(ACTIVITY_PIN, 1);
                 printf("Write default Settings? (y/n) ");
                 fgets(buf, sizeof(buf), stdin);
                 clear_newline(buf);
@@ -727,15 +747,23 @@ int main() {
                 }
             
             }else if(strcmp(buf, "list") == 0){
+                gpio_put(ACTIVITY_PIN, 1);
                 print_new_settings_object();
 
             }else{
+                gpio_put(ACTIVITY_PIN, 1);
                 printf("Unknown command.\nSend COMMAND<lf><cr>\n");
             }
+
+            gpio_put(ACTIVITY_PIN, 0);
 
         }
 
     }
+
+    printf("Fatal error. Reboot system.\n");
+
+    pwm_start(ACTIVITY_PIN, 8, 50);
 
     return 0;
 
@@ -794,6 +822,7 @@ void get_uart_response(uart_inst_t* interface, std::array<uint8_t, BUFF_SIZE>& b
 
     uint8_t data = 0;
     while (uart_is_readable(interface)){ //get any available data
+        gpio_put(ACTIVITY_PIN, 1);
         data = uart_getc(interface);
         printf("%s: received 0x%X\n", name, data);
 
@@ -949,7 +978,7 @@ bool power_cam_off(uart_inst_t *uart){
 
 //return 1 if pin != normal_state else return 0
 int gpio_debounce(uint pin, bool normal_state){
-    if(!gpio_get(pin) == normal_state){
+    if(gpio_get(pin) != normal_state){
         sleep_ms(20);
         if(!gpio_get(pin) == normal_state){
             return 1;
