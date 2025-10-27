@@ -5,25 +5,48 @@ UART address resolver v1.1 with debug printfs
 Accepts baud rates from 300 to 115200.
 
 
-To do:
+==========Notes:==========
 
-adjust power inq delay. make sure command is right (make sure byte 0 is right, idk.).
+reversed through and main!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+==========To do:==========
 
 Add check of return values for power on and off.
 
-
-Notes:
+Remove PIO debug side pins
 
 set counter in nvs loop to go to main loop if no activity.
 
-Add debug printf for power_inq and on/off for response packets.
+Sanitize baud rate with isdigit()
 
 
-Bugs:
 
-power_inq response check is bad. 
-power_cam_on and off are reversed.
-Camera side response header addr is 0x90. Make sure code can handle that.
+stop using goto, instead use a switch:
+
+enum State { INIT, SET_NVS, MAIN_LOOP };
+State state = INIT;
+
+while (true) {
+    switch (state) {
+        case INIT:
+            if (!is_power_pressed)
+                state = SET_NVS;
+            else
+                state = MAIN_LOOP;
+            break;
+
+        case SET_NVS:
+            Settings::write_settings(FLASH_WRITE_START);
+            state = MAIN_LOOP;
+            break;
+
+        case MAIN_LOOP:
+            // your main loop body
+            break;
+    }
+}
+
 
 
 */
@@ -86,15 +109,23 @@ constexpr uint rx0 = 1;
 constexpr uint tx1 = 4;
 constexpr uint rx1 = 5;
 
+
+//original assignments
 constexpr uint PIO_TX_PIN0 = 17;
 constexpr uint PIO_RX_PIN0 = 16;
 constexpr uint PIO_TX_PIN1 = 19;
 constexpr uint PIO_RX_PIN1 = 18;
 
+// Secondary assignements
+// constexpr uint PIO_TX_PIN1 = 17;
+// constexpr uint PIO_RX_PIN1 = 16;
+// constexpr uint PIO_TX_PIN0 = 19;
+// constexpr uint PIO_RX_PIN0 = 18;
+
+// PIO debug pins. Remove these
 constexpr uint PIO_DEBUG0 = 10;
 constexpr uint PIO_DEBUG1 = 11;
 
-// constexpr uint ERROR_PIN = 20;
 constexpr uint ACTIVITY_PIN = 20;
 constexpr uint MASTER_POWER_PIN = 21;
 
@@ -317,10 +348,17 @@ int main() {
         goto set_nvs;
     }
 
+    // static uint32_t loop_counter = 0;
+
 
     /************************************ Main Loop ****************************************************/
     main_loop:
     while (true) {
+
+        // Occasional Print to confirm no hanging code
+        // if (loop_counter++ % 100000 == 0) {
+        //     printf("LOOP ALIVE: %lu\n", loop_counter/100000);
+        // }
 
         if (!pio_sm_is_rx_fifo_empty(pio, 0)) {
             gpio_put(ACTIVITY_PIN, 1);
@@ -504,6 +542,7 @@ int main() {
         if (main_flag){ 
             while (main_tx_index < (main_flag) && !pio_sm_is_tx_fifo_full(pio, 1) && main_flag){
                 gpio_put(ACTIVITY_PIN, 1);
+                printf("if1: sent %X", main_tx_buff[main_tx_index]);
                 pio_sm_put(pio, 1, main_tx_buff[main_tx_index++]);
             }
 
@@ -646,6 +685,8 @@ int main() {
                 gpio_put(ACTIVITY_PIN, 1);
                 settings_object temp = new_settings;
                 printf("edit\n");
+
+                //note: use isdigit() to sanitize
 
                 printf("    Send 'x' to skip changing an entry\n\n");
 
