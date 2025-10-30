@@ -14,40 +14,7 @@ reversed through and main!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 Add check of return values for power on and off.
 
-Remove PIO debug side pins
-
 set counter in nvs loop to go to main loop if no activity.
-
-Sanitize baud rate with isdigit()
-
-
-
-stop using goto, instead use a switch:
-
-enum State { INIT, SET_NVS, MAIN_LOOP };
-State state = INIT;
-
-while (true) {
-    switch (state) {
-        case INIT:
-            if (!is_power_pressed)
-                state = SET_NVS;
-            else
-                state = MAIN_LOOP;
-            break;
-
-        case SET_NVS:
-            Settings::write_settings(FLASH_WRITE_START);
-            state = MAIN_LOOP;
-            break;
-
-        case MAIN_LOOP:
-            // your main loop body
-            break;
-    }
-}
-
-
 
 */
 
@@ -109,7 +76,6 @@ constexpr uint rx0 = 1;
 constexpr uint tx1 = 4;
 constexpr uint rx1 = 5;
 
-
 //original assignments
 constexpr uint PIO_TX_PIN0 = 17;
 constexpr uint PIO_RX_PIN0 = 16;
@@ -122,10 +88,6 @@ constexpr uint PIO_RX_PIN1 = 18;
 // constexpr uint PIO_TX_PIN0 = 19;
 // constexpr uint PIO_RX_PIN0 = 18;
 
-// PIO debug pins. Remove these
-constexpr uint PIO_DEBUG0 = 10;
-constexpr uint PIO_DEBUG1 = 11;
-
 constexpr uint ACTIVITY_PIN = 20;
 constexpr uint MASTER_POWER_PIN = 21;
 
@@ -134,7 +96,7 @@ constexpr uint MASTER_POWER_SW = 12;
 
 // Protocol addresses
 constexpr size_t BUFF_SIZE = 32;
-constexpr uint MAX_PACKET_QUEUE = 9;
+constexpr uint MAX_PACKET_QUEUE = 10;
 
 //Timing
 constexpr uint POWER_CAMS_BLINK_TIME = 200;
@@ -192,7 +154,12 @@ Packet main_tx_queue[MAX_PACKET_QUEUE];
 size_t queue_head = 0;
 size_t queue_tail = 0;
 
-void uart_rx_program_init(PIO pio, uint sm, uint offset, uint pin_rx, uint pin_debug, uint baud);
+
+enum State { INIT, SET_NVS, MAIN_LOOP };
+State state = INIT;
+
+
+void uart_rx_program_init(PIO pio, uint sm, uint offset, uint pin_rx, uint baud);  //uint pin_debug, 
 int uart_rx_program_getc(PIO pio, uint sm, uint8_t* out_byte);
 bool dequeue_packet(uint8_t* out_data, size_t& out_length);
 bool enqueue_packet(const uint8_t* data, size_t length);
@@ -211,7 +178,7 @@ void print_new_settings_object();
 void set_response_headers();
 bool blink_power_pin(repeating_timer_t *rt);
 void clear_all_inputs_and_outputs();
-
+void update_pio_clock(PIO pio, uint sm, uint baud);
 
 
 /************************************ Main ******************************************/
@@ -219,7 +186,6 @@ int main() {
 
     stdio_init_all();
     sleep_ms(2000); // Wait for USB serial connection
-
     printf("Init GPIO...\n");
 
     // GPIO initialization
@@ -254,7 +220,7 @@ int main() {
     Settings::getMAGIC(&new_settings.magic_v);
     if(new_settings.magic_v == SETTINGS_MAGIC){
         printf("Found valid settings.\n");
-        sleep_ms(1000);
+        sleep_ms(20);
         //settings valid
         Settings::getCH1_ADDR(&new_settings.addr1_v);
         Settings::getCH2_ADDR(&new_settings.addr2_v);
@@ -264,7 +230,7 @@ int main() {
 
     }else{
         printf("No valid settings found...\nWriting defaults\n");
-        sleep_ms(1000);
+        sleep_ms(20);
         //write default settings
         Settings::clear();
         Settings::setCH1_ADDR(default_settings.addr1_v);
@@ -284,12 +250,6 @@ int main() {
     uart_init(uart0, new_settings.baud_v);
     uart_init(uart1, new_settings.baud_v);
 
-    // PIO debug pins
-    pio_gpio_init(pio, PIO_DEBUG0);
-    pio_gpio_init(pio, PIO_DEBUG1);
-    gpio_set_function(PIO_DEBUG0, GPIO_FUNC_PIO0);
-    gpio_set_function(PIO_DEBUG1, GPIO_FUNC_PIO0);
-
     // UART pin function setup
     gpio_set_function(tx0, GPIO_FUNC_UART);
     gpio_set_function(rx0, GPIO_FUNC_UART);
@@ -306,519 +266,561 @@ int main() {
     uint offset_rx = pio_add_program(pio, &uart_rx_program);
     uint offset_tx = pio_add_program(pio, &uart_tx_program);
 
-    uart_rx_program_init(pio, 0, offset_rx, PIO_RX_PIN0, PIO_DEBUG0, new_settings.baud_v);
+    uart_rx_program_init(pio, 0, offset_rx, PIO_RX_PIN0, new_settings.baud_v); 
     uart_tx_program_init(pio, 1, offset_tx, PIO_TX_PIN0, new_settings.baud_v);
-    uart_rx_program_init(pio, 2, offset_rx, PIO_RX_PIN1, PIO_DEBUG1, new_settings.baud_v);
+    uart_rx_program_init(pio, 2, offset_rx, PIO_RX_PIN1, new_settings.baud_v); 
     uart_tx_program_init(pio, 3, offset_tx, PIO_TX_PIN1, new_settings.baud_v);
 
 
     //printf("RS-232 baud rate is %d\n", new_settings.baud_v);
 
-    printf("Scanning for cameras...\n");
-
-    // gpio_put(ERROR_PIN, 0);
-    gpio_put(MASTER_POWER_PIN, 0);
-
-    sleep_ms(1000);
-
-    //inital power check
-    int check1 = 0;
-    int check2 = 0;
-    check1 = cam_power_inq(uart0);
-    check2 = cam_power_inq(uart1);
-
-    if((check1 == 1) && (check2 == 1)){
-        gpio_put(MASTER_POWER_PIN, 1);
-
-    }else if((check1 == -1) && (check2 == 1)){
-        gpio_put(MASTER_POWER_PIN, 1);
-
-    }else if((check1 == 1) && (check2 == -1)){
-        gpio_put(MASTER_POWER_PIN, 1);
-    }
-
-    printf("Init Success!\n");
-    gpio_put(ACTIVITY_PIN, 0);
-
-    // Non-blocking check
-    int c = getchar_timeout_us(0);  // 0 = don’t wait
-    if (c != PICO_ERROR_TIMEOUT) {
-        printf("Jumping to Setting configuration.\n\n\n");
-        clear_all_inputs_and_outputs();
-        goto set_nvs;
-    }
-
-    // static uint32_t loop_counter = 0;
 
 
-    /************************************ Main Loop ****************************************************/
-    main_loop:
-    while (true) {
-
-        // Occasional Print to confirm no hanging code
-        // if (loop_counter++ % 100000 == 0) {
-        //     printf("LOOP ALIVE: %lu\n", loop_counter/100000);
-        // }
-
-        if (!pio_sm_is_rx_fifo_empty(pio, 0)) {
-            gpio_put(ACTIVITY_PIN, 1);
-
-            
-            if (main_rx_index >= BUFF_SIZE) {
-                printf("Main: rx buffer overflow, resetting index.\n");
-                main_rx_index = 0;
-            }
-            
-            uint8_t data = 0;
-            int check = uart_rx_program_getc(pio, 0, &data);
-
-            if (check < 0) {
-                printf("Framing error from master, data received: 0x%X\n", data);
-                main_rx_index = 0;
-                main_rx_buff.fill(0);
-
-            } else {
-                main_rx_buff[main_rx_index++] = data;
-                printf("Received: 0x%X\n", data);
-
-                if (data == 0xFF) {
-                    printf("Main: terminator received\nMain: buffer: ");
-                    for (size_t i = 0; i < main_rx_index; ++i){
-                        printf("0x%02X ", main_rx_buff[i]);
-                    }
-                    printf("\n");
-
-                    if(main_rx_buff[0] == new_settings.addr1_v){
-                        printf("Printing on if1\n");
-                        main_rx_buff[0] = 0x81;
-                        std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart0_tx_buff.begin());
-                        ch1_flag = main_rx_index;
-                        
-                    }else if(main_rx_buff[0] == new_settings.addr2_v){
-                        printf("Printing on if2\n");
-                        main_rx_buff[0] = 0x81;
-                        std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart1_tx_buff.begin());
-                        ch2_flag = main_rx_index;
-                        
-                    }else if((main_rx_buff[0] == 0x80) || (main_rx_buff[0] == 0x88)){
-
-                        printf("Broadcasting\n");
-                        std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart0_tx_buff.begin());
-                        uart0_tx_buff[0] = new_settings.ch1_b_id;                                                
-                        std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart1_tx_buff.begin());
-                        uart1_tx_buff[0] = new_settings.ch2_b_id;
-                        std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, through_tx_buff.begin());
-                        ch1_flag = ch2_flag = through_flag = main_rx_index;
-
-                    }else{
-                        if ((main_rx_buff[0] & 0xF0) == 0x80) {
-                            printf("Writing to if3\n");
-                            std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, through_tx_buff.begin());
-                            through_flag = main_rx_index;
-                        } else {
-                            // gpio_put(ERROR_PIN, 1);
-                            printf("Invalid command from master, addr: 0x%x\n", main_rx_buff[0]);
-                            // gpio_put(ERROR_PIN, 0);
-                        }
-                    }
-
-                    main_rx_index = 0;
-                    main_rx_buff.fill(0);
-                }
-            }
-
-            gpio_put(ACTIVITY_PIN, 0);
-
-        }
-
-        // Transmit handling
-        if (ch1_flag) {
-            while (uart_is_writable(uart0) && uart0_tx_index < ch1_flag){
-                gpio_put(ACTIVITY_PIN, 1);
-                uart_putc(uart0, uart0_tx_buff[uart0_tx_index]);
-                printf("if1: sent 0x%X\n", uart0_tx_buff[uart0_tx_index]);
-                uart0_tx_index++;
-
-            }
-
-            if (uart0_tx_index >= ch1_flag){
-                uart0_tx_index = ch1_flag = 0;
-            }
-
-        }
-
-        if (ch2_flag) {
-            while (uart_is_writable(uart1) && uart1_tx_index < ch2_flag){
-                gpio_put(ACTIVITY_PIN, 1);
-                uart_putc(uart1, uart1_tx_buff[uart1_tx_index]);
-                printf("if2: sent 0x%X\n", uart1_tx_buff[uart1_tx_index]);
-                uart1_tx_index++;
-            }
-
-            if (uart1_tx_index >= ch2_flag){
-                uart1_tx_index = ch2_flag = 0;
-            }
-        }
-
-        if (through_flag) {
-            while (through_tx_index < through_flag && !pio_sm_is_tx_fifo_full(pio, 3)){
-                gpio_put(ACTIVITY_PIN, 1);
-                pio_sm_put(pio, 3, through_tx_buff[through_tx_index]);
-                printf("if3: sent 0x%X\n", through_tx_buff[through_tx_index]);
-                through_tx_index++;
-
-            }
-
-            if (through_tx_index >= through_flag){
-                through_tx_index = through_flag = 0;
-            }
-        }
-
-        // Receivee handling 
-        get_uart_response(uart0, uart0_rx_buff, uart0_rx_index, "if1");
-        gpio_put(ACTIVITY_PIN, 0);
-        get_uart_response(uart1, uart1_rx_buff, uart1_rx_index, "if2");
-        gpio_put(ACTIVITY_PIN, 0);
-
-        while (!pio_sm_is_rx_fifo_empty(pio, 2)) { 
-
-            gpio_put(ACTIVITY_PIN, 1);
-            if (through_rx_index >= BUFF_SIZE) {
-                printf("if3: buffer overflow, resetting index.\n");
-                through_rx_buff.fill(0);
-                through_rx_index = 0;
-            }
-
-            uint8_t data = 0;
-            int check = uart_rx_program_getc(pio, 2, &data);
-
-            if (check < 0) {
-                printf("if3: Framing error. Data: 0x%X\n", data);
-                through_rx_buff.fill(0);
-                through_rx_index = 0;
-
-            } else {
-                through_rx_buff[through_rx_index] = data;
-                printf("if3: received 0x%X\n", through_rx_buff[through_rx_index]);
-                if(through_rx_buff[through_rx_index] == 0xFF){
-                    if((through_rx_buff[0] & 0xF0) == 0x90){
-                        printf("if3: terminator received, attempting to enqueue packet: ");
-                        print_array(through_rx_buff, through_rx_index + 1);
-                        printf("\n");
-                        if(enqueue_packet(through_rx_buff.data(), through_rx_index +1)){
-                            printf("if3: enqueue success!\n");
-                        }
-                        else {
-                            printf("if3: enqueue failed\n");
-                        }
-
-                    }else{
-                        printf("if3: received bad response addr 0x%02X\n", through_rx_buff[0]);
-                    }
-
-                    through_rx_index = 0;
-                    through_rx_buff.fill(0);
-
-                }else{
-                through_rx_index++;
-                }
-            }
-
-        }
-
-        //Dequeue package if not already
-        if (!main_flag){   
-            if (dequeue_packet(main_tx_buff.data(), main_flag)){
-                gpio_put(ACTIVITY_PIN, 1);
-                printf("Dequeued: ");
-                print_array(main_tx_buff, main_flag);
-                printf("\n");
-                main_tx_index = 0;
-            }
-
-        }
-
-        //Transmit package
-        if (main_flag){ 
-            while (main_tx_index < (main_flag) && !pio_sm_is_tx_fifo_full(pio, 1) && main_flag){
-                gpio_put(ACTIVITY_PIN, 1);
-                printf("if1: sent %X", main_tx_buff[main_tx_index]);
-                pio_sm_put(pio, 1, main_tx_buff[main_tx_index++]);
-            }
-
-            if(main_tx_index >= main_flag){
-                main_tx_index = main_flag = 0;
-                through_rx_buff.fill(0);
-            }
-            
-        }
-
-        //master power options
-        if(gpio_debounce(MASTER_POWER_SW, 1)){
-            gpio_put(ACTIVITY_PIN, 1);
-            printf("Changing camera power state\n");
-            bool cam_is_on = gpio_get(MASTER_POWER_PIN);
-            add_repeating_timer_ms(POWER_CAMS_BLINK_TIME, blink_power_pin, NULL, &power_pin_timer);
-
-            if(cam_is_on){
-                printf("Powering both cameras off!\n");
-                bool cam1_ok = power_cam_off(uart0);
-                bool cam2_ok = power_cam_off(uart1);
-                gpio_put(MASTER_POWER_PIN, 0);
-
-                // if(!cam1_ok) printf("Warning: Camera 1 power off failed!\n");
-                // if(!cam2_ok) printf("Warning: Camera 2 power off failed!\n");
-                // gpio_put(MASTER_POWER_PIN, (cam1_ok || cam2_ok) ? 1 : 0);
-
-                while(gpio_debounce(MASTER_POWER_SW, 1)){
-                    sleep_ms(100);
-                }
-
-            }else{
-                printf("Powering both cameras on!\n");
-                bool cam1_ok = power_cam_on(uart0);
-                bool cam2_ok = power_cam_on(uart1);
-                gpio_put(MASTER_POWER_PIN, 0);
-
-                // if(!cam1_ok) printf("Warning: Camera 1 power on failed!\n"); //check if success
-                // if(!cam2_ok) printf("Warning: Camera 2 power on failed!\n");
-                // gpio_put(MASTER_POWER_PIN, (cam1_ok || cam2_ok) ? 1 : 0); //set power light based on response
-                
-                while(gpio_debounce(MASTER_POWER_SW, 1)){
-                    sleep_ms(100);
-                }
-
-            }
-            cancel_repeating_timer(&power_pin_timer);
-            gpio_put(MASTER_POWER_PIN, !cam_is_on); //old method
-            gpio_put(ACTIVITY_PIN, 0);
-            printf("done changing camera power.\n");
-
-        }
-    
-        gpio_put(ACTIVITY_PIN, 0);
-
-        // Non-blocking check
-        int c = getchar_timeout_us(0);  // 0 = don’t wait
-        if (c != PICO_ERROR_TIMEOUT) {
-            printf("Jumping to Setting configuration.\n\n\n");
-            clear_all_inputs_and_outputs();
-            goto set_nvs;
-            
-        }
-
-    }
-
-
-
-    /*********************************** Set NVS loop ***************************************************/
-    set_nvs:
     while(1){
-        gpio_put(ACTIVITY_PIN, 1);
-        bool save_is_cam_on_in_nvs = gpio_get(MASTER_POWER_PIN);
-        add_repeating_timer_ms(NVS_BLINK_TIME, blink_power_pin, NULL, &power_pin_timer);
-        
-        int ch;
-        while ((ch = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT);     //clear garbage from usb buffer
+        switch (state){
 
-        // Wait for USB terminal connection
-        int nvs_timout_value = 30;
-        int nvs_timout_counter = 0;
-        while (!stdio_usb_connected() && nvs_timout_counter < nvs_timout_value) {
-            sleep_ms(100);
-            nvs_timout_counter++;
+        case INIT:{
+
+            printf("Scanning for cameras...\n");
+            gpio_put(MASTER_POWER_PIN, 0);
+
+            sleep_ms(20);
+
+            //inital power check
+            int check1 = 0;
+            int check2 = 0;
+            check1 = cam_power_inq(uart0);
+            check2 = cam_power_inq(uart1);
+
+            if((check1 == 1) && (check2 == 1)){
+                gpio_put(MASTER_POWER_PIN, 1);
+
+            }else if((check1 == -1) && (check2 == 1)){
+                gpio_put(MASTER_POWER_PIN, 1);
+
+            }else if((check1 == 1) && (check2 == -1)){
+                gpio_put(MASTER_POWER_PIN, 1);
+            }
+
+            printf("Init Success!\n");
+            gpio_put(ACTIVITY_PIN, 0);
+
+            // Non-blocking check
+            int c = getchar_timeout_us(0);  // 0 = don’t wait
+            if (c != PICO_ERROR_TIMEOUT) {
+                printf("Jumping to Setting configuration.\n\n\n");
+                clear_all_inputs_and_outputs();
+                state = SET_NVS;
+            }
+
+            for(uint sm = 0; sm<4; sm++){
+
+                update_pio_clock(pio, sm, new_settings.baud_v);
+            }
+
+            state = MAIN_LOOP;
+
+            // static uint32_t loop_counter = 0;
+            break;
+
         }
-
-        if(nvs_timout_counter >= nvs_timout_value){
-            cancel_repeating_timer(&power_pin_timer);
-            gpio_put(MASTER_POWER_PIN, save_is_cam_on_in_nvs);
-            goto main_loop;
-
-        }
-
-        printf("\nYou have entered config mode.\nIf this was unintentional: wait a few seconds, then unplug\n");      
-        sleep_ms(1000);
-
-        //init nvs
-        Settings::nvs_init();
         
-        //check for vaild settings
-        Settings::getMAGIC(&new_settings.magic_v);
-        if(new_settings.magic_v == SETTINGS_MAGIC){
-            printf("Found valid settings.\n");
-            sleep_ms(1000);
-            //settings valid
-            Settings::getCH1_ADDR(&new_settings.addr1_v);
-            Settings::getCH2_ADDR(&new_settings.addr2_v);
-            Settings::getCH1_B_ID(&new_settings.ch1_b_id);
-            Settings::getCH2_B_ID(&new_settings.ch2_b_id);
-            Settings::getBAUD_RATE(&new_settings.baud_v);
-        
-        }else{
-            printf("No valid settings found...\nWriting defaults\n");
-            sleep_ms(1000);
-            //write default settings
-            Settings::setCH1_ADDR(default_settings.addr1_v);
-            Settings::setCH2_ADDR(default_settings.addr2_v);
-            Settings::setCH1_B_ID(default_settings.ch1_b_id);
-            Settings::setCH2_B_ID(default_settings.ch2_b_id);
-            Settings::setBAUD_RATE(default_settings.baud_v);
-            Settings::setMAGIC(default_settings.magic_v);
-            Settings::commit();
+        case MAIN_LOOP:{
 
-            new_settings = default_settings;
+            /************************************ Main Loop ****************************************************/
+
+            while (state == MAIN_LOOP) {
+
+                // Occasional Print to confirm no hanging code
+                // if (loop_counter++ % 100000 == 0) {
+                //     printf("LOOP ALIVE: %lu\n", loop_counter/100000);
+                // }
+
+                if (!pio_sm_is_rx_fifo_empty(pio, 0)) {
+                    gpio_put(ACTIVITY_PIN, 1);
+
+                    
+                    if (main_rx_index >= BUFF_SIZE) {
+                        printf("Main: rx buffer overflow, resetting index.\n");
+                        main_rx_index = 0;
+                    }
+                    
+                    uint8_t data = 0;
+                    int check = uart_rx_program_getc(pio, 0, &data);
+
+                    if (check < 0) {
+                        printf("Framing error from master, data received: 0x%X\n", data);
+                        main_rx_index = 0;
+                        main_rx_buff.fill(0);
+
+                    } else {
+                        main_rx_buff[main_rx_index++] = data;
+                        printf("Received: 0x%X\n", data);
+
+                        if (data == 0xFF) {
+                            printf("Main: terminator received\nMain: buffer: ");
+                            for (size_t i = 0; i < main_rx_index; ++i){
+                                printf("0x%02X ", main_rx_buff[i]);
+                            }
+                            printf("\n");
+
+                            if(main_rx_buff[0] == new_settings.addr1_v){
+                                printf("Printing on if1\n");
+                                main_rx_buff[0] = 0x81;
+                                std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart0_tx_buff.begin());
+                                ch1_flag = main_rx_index;
+                                
+                            }else if(main_rx_buff[0] == new_settings.addr2_v){
+                                printf("Printing on if2\n");
+                                main_rx_buff[0] = 0x81;
+                                std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart1_tx_buff.begin());
+                                ch2_flag = main_rx_index;
+                                
+                            }else if((main_rx_buff[0] == 0x80) || (main_rx_buff[0] == 0x88)){
+
+                                printf("Broadcasting\n");
+                                std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart0_tx_buff.begin());
+                                uart0_tx_buff[0] = new_settings.ch1_b_id;                                                
+                                std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, uart1_tx_buff.begin());
+                                uart1_tx_buff[0] = new_settings.ch2_b_id;
+                                std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, through_tx_buff.begin());
+                                ch1_flag = ch2_flag = through_flag = main_rx_index;
+
+                            }else{
+                                if ((main_rx_buff[0] & 0xF0) == 0x80) {
+                                    printf("Writing to if3\n");
+                                    std::copy(main_rx_buff.begin(), main_rx_buff.begin() + main_rx_index, through_tx_buff.begin());
+                                    through_flag = main_rx_index;
+                                } else {
+                                    // gpio_put(ERROR_PIN, 1);
+                                    printf("Invalid command from master, addr: 0x%x\n", main_rx_buff[0]);
+                                    // gpio_put(ERROR_PIN, 0);
+                                }
+                            }
+
+                            main_rx_index = 0;
+                            main_rx_buff.fill(0);
+                        }
+                    }
+
+                    gpio_put(ACTIVITY_PIN, 0);
+
+                }
+
+                // Transmit handling
+                if (ch1_flag) {
+                    while (uart_is_writable(uart0) && uart0_tx_index < ch1_flag){
+                        gpio_put(ACTIVITY_PIN, 1);
+                        uart_putc(uart0, uart0_tx_buff[uart0_tx_index]);
+                        printf("if1: sent 0x%X\n", uart0_tx_buff[uart0_tx_index]);
+                        uart0_tx_index++;
+
+                    }
+
+                    if (uart0_tx_index >= ch1_flag){
+                        uart0_tx_index = ch1_flag = 0;
+                    }
+
+                }
+
+                if (ch2_flag) {
+                    while (uart_is_writable(uart1) && uart1_tx_index < ch2_flag){
+                        gpio_put(ACTIVITY_PIN, 1);
+                        uart_putc(uart1, uart1_tx_buff[uart1_tx_index]);
+                        printf("if2: sent 0x%X\n", uart1_tx_buff[uart1_tx_index]);
+                        uart1_tx_index++;
+                    }
+
+                    if (uart1_tx_index >= ch2_flag){
+                        uart1_tx_index = ch2_flag = 0;
+                    }
+                }
+
+                if (through_flag) {
+                    while (through_tx_index < through_flag && !pio_sm_is_tx_fifo_full(pio, 3)){
+                        gpio_put(ACTIVITY_PIN, 1);
+                        pio_sm_put(pio, 3, through_tx_buff[through_tx_index]);
+                        printf("if3: sent 0x%X\n", through_tx_buff[through_tx_index]);
+                        through_tx_index++;
+
+                    }
+
+                    if (through_tx_index >= through_flag){
+                        through_tx_index = through_flag = 0;
+                    }
+                }
+
+                // Receivee handling 
+                get_uart_response(uart0, uart0_rx_buff, uart0_rx_index, "if1");
+                gpio_put(ACTIVITY_PIN, 0);
+                get_uart_response(uart1, uart1_rx_buff, uart1_rx_index, "if2");
+                gpio_put(ACTIVITY_PIN, 0);
+
+                while (!pio_sm_is_rx_fifo_empty(pio, 2)) { 
+
+                    gpio_put(ACTIVITY_PIN, 1);
+                    if (through_rx_index >= BUFF_SIZE) {
+                        printf("if3: buffer overflow, resetting index.\n");
+                        through_rx_buff.fill(0);
+                        through_rx_index = 0;
+                    }
+
+                    uint8_t data = 0;
+                    int check = uart_rx_program_getc(pio, 2, &data);
+
+                    if (check < 0) {
+                        printf("if3: Framing error. Data: 0x%X\n", data);
+                        through_rx_buff.fill(0);
+                        through_rx_index = 0;
+
+                    } else {
+                        through_rx_buff[through_rx_index] = data;
+                        printf("if3: received 0x%X\n", through_rx_buff[through_rx_index]);
+                        if(through_rx_buff[through_rx_index] == 0xFF){
+                            if((through_rx_buff[0] & 0xF0) == 0x90){
+                                printf("if3: terminator received, attempting to enqueue packet: ");
+                                print_array(through_rx_buff, through_rx_index + 1);
+                                printf("\n");
+                                if(enqueue_packet(through_rx_buff.data(), through_rx_index +1)){
+                                    printf("if3: enqueue success!\n");
+                                }
+                                else {
+                                    printf("if3: enqueue failed\n");
+                                }
+
+                            }else{
+                                printf("if3: received bad response addr 0x%02X\n", through_rx_buff[0]);
+                            }
+
+                            through_rx_index = 0;
+                            through_rx_buff.fill(0);
+
+                        }else{
+                        through_rx_index++;
+                        }
+                    }
+
+                }
+
+                //Dequeue package if not already
+                if (!main_flag){   
+                    if (dequeue_packet(main_tx_buff.data(), main_flag)){
+                        gpio_put(ACTIVITY_PIN, 1);
+                        printf("Dequeued: ");
+                        print_array(main_tx_buff, main_flag);
+                        printf("\n");
+                        main_tx_index = 0;
+                    }
+
+                }
+
+                //Transmit package
+                if (main_flag){ 
+                    while (main_tx_index < (main_flag) && !pio_sm_is_tx_fifo_full(pio, 1) && main_flag){
+                        gpio_put(ACTIVITY_PIN, 1);
+                        printf("master: sent %X\n", main_tx_buff[main_tx_index]);
+                        pio_sm_put(pio, 1, main_tx_buff[main_tx_index++]);
+                    }
+
+                    if(main_tx_index >= main_flag){
+                        main_tx_index = main_flag = 0;
+                        through_rx_buff.fill(0);
+                    }
+                    
+                }
+
+                //master power options
+                if(gpio_debounce(MASTER_POWER_SW, 1)){
+                    gpio_put(ACTIVITY_PIN, 1);
+                    printf("Changing camera power state\n");
+                    bool cam_is_on = gpio_get(MASTER_POWER_PIN);
+                    add_repeating_timer_ms(POWER_CAMS_BLINK_TIME, blink_power_pin, NULL, &power_pin_timer);
+
+                    if(cam_is_on){
+                        printf("Powering both cameras off!\n");
+                        bool cam1_ok = power_cam_off(uart0);
+                        bool cam2_ok = power_cam_off(uart1);
+                        gpio_put(MASTER_POWER_PIN, 0);
+
+                        // if(!cam1_ok) printf("Warning: Camera 1 power off failed!\n");
+                        // if(!cam2_ok) printf("Warning: Camera 2 power off failed!\n");
+                        // gpio_put(MASTER_POWER_PIN, (cam1_ok || cam2_ok) ? 1 : 0);
+
+                        while(gpio_debounce(MASTER_POWER_SW, 1)){
+                            sleep_ms(100);
+                        }
+
+                    }else{
+                        printf("Powering both cameras on!\n");
+                        bool cam1_ok = power_cam_on(uart0);
+                        bool cam2_ok = power_cam_on(uart1);
+                        gpio_put(MASTER_POWER_PIN, 0);
+
+                        // if(!cam1_ok) printf("Warning: Camera 1 power on failed!\n"); //check if success
+                        // if(!cam2_ok) printf("Warning: Camera 2 power on failed!\n");
+                        // gpio_put(MASTER_POWER_PIN, (cam1_ok || cam2_ok) ? 1 : 0); //set power light based on response
+                        
+                        while(gpio_debounce(MASTER_POWER_SW, 1)){
+                            sleep_ms(100);
+                        }
+
+                    }
+                    cancel_repeating_timer(&power_pin_timer);
+                    gpio_put(MASTER_POWER_PIN, !cam_is_on); //old method
+                    gpio_put(ACTIVITY_PIN, 0);
+                    printf("done changing camera power.\n");
+
+                }
             
+                gpio_put(ACTIVITY_PIN, 0);
+
+                // Non-blocking check
+                int c = getchar_timeout_us(0);  // 0 = don’t wait
+                if (c != PICO_ERROR_TIMEOUT) {
+                    printf("Jumping to Setting configuration.\n\n\n");
+                    clear_all_inputs_and_outputs();
+                    state = SET_NVS;
+                    break;
+                    
+                }
+
+            }
+
+            break;
         }
-        set_response_headers();
-        print_new_settings_object();
 
-        gpio_put(ACTIVITY_PIN, 0);
-                
-        char buf[64];
-        
-        while (true) {
-            printf("Commands: 'list', 'edit', 'default', 'update', 'exit'\n>>> ");
-            fgets(buf, sizeof(buf), stdin);
-            clear_newline(buf);
+        case SET_NVS:{
+            /*********************************** Set NVS loop ************************************************/
 
-            if (strcmp(buf, "edit") == 0) {
-                gpio_put(ACTIVITY_PIN, 1);
-                settings_object temp = new_settings;
-                printf("edit\n");
+            gpio_put(ACTIVITY_PIN, 1);
+            bool save_is_cam_on_in_nvs = gpio_get(MASTER_POWER_PIN);
+            add_repeating_timer_ms(NVS_BLINK_TIME, blink_power_pin, NULL, &power_pin_timer);
+            
+            int ch;
+            while ((ch = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT);     //clear garbage from usb buffer
 
-                //note: use isdigit() to sanitize
-
-                printf("    Send 'x' to skip changing an entry\n\n");
-
-                printf("    Enter new CH1_ID (1-7): ");
-                fgets(buf, sizeof(buf), stdin);
-                if(buf[0] != 'x'){
-                    temp.addr1_v = atoi(buf);
-                    temp.addr1_v = (temp.addr1_v & 0x07) | 0x80;
-                    if(temp.addr1_v == 0x80) temp.addr1_v = 0x81;
-                }
-                printf("%d\n", (temp.addr1_v & 0x0f));
-
-
-                printf("    Enter new CH2_ID (1-7): ");
-                fgets(buf, sizeof(buf), stdin);
-                if(buf[0] != 'x'){
-                    temp.addr2_v = atoi(buf);
-                    temp.addr2_v = (temp.addr2_v & 0x07) | 0x80;
-                    if(temp.addr2_v == 0x80) temp.addr2_v = 0x82;
-                }
-                printf("%d\n", (temp.addr2_v & 0x0f));
-
-                printf("    Enter new CH1 broadcast ID (0 or 8): ");
-                fgets(buf, sizeof(buf), stdin);
-                if(buf[0] != 'x'){
-                    temp.ch1_b_id = atoi(buf);
-                    temp.ch1_b_id = (temp.ch1_b_id & 0x08) | 0x80;
-                }
-                printf("%d\n", (temp.ch1_b_id & 0x0f));
-                
-                printf("    Enter new CH2 broadcast ID (0 or 8): ");
-                fgets(buf, sizeof(buf), stdin);
-                if(buf[0] != 'x'){
-                    temp.ch2_b_id = atoi(buf);
-                    temp.ch2_b_id = (temp.ch2_b_id & 0x08) | 0x80;
-                }
-                printf("%d\n", (temp.ch2_b_id & 0x0f));
-
-                printf("    Baud rate can be anything from 300 to 115200.\n");
-                printf("    Enter new Baud rate: ");
-                fgets(buf, sizeof(buf), stdin);
-                if(buf[0] != 'x'){
-                    temp.baud_v = atoi(buf);
-                }
-                if(temp.baud_v < 300) temp.baud_v = 300;
-                if(temp.baud_v > 115200) temp.baud_v = 115200;
-                printf("%d\n", temp.baud_v);
-
-                temp.magic_v = SETTINGS_MAGIC;
-
-                printf("    Save these settings? (y/n): ");
-                fgets(buf, sizeof(buf), stdin);
-                clear_newline(buf);
-
-                if (strcmp(buf, "y") == 0 || strcmp(buf, "Y") == 0) {
-
-                    Settings::setCH1_ADDR(temp.addr1_v);
-                    Settings::setCH2_ADDR(temp.addr2_v);
-                    Settings::setCH1_B_ID(temp.ch1_b_id);
-                    Settings::setCH2_B_ID(temp.ch2_b_id);
-                    Settings::setBAUD_RATE(temp.baud_v);
-                    Settings::setMAGIC(temp.magic_v);
-                    sleep_ms(1000);
-
-                    if(Settings::commit() == NVS_OK){
-                        printf("y\n        Changes saved!\n");
-                    }
-                    else{
-                        printf("        Error: write to flash failed.\n    Changes will not survive reboot!");
-                    }
-                    new_settings = temp;
-                    set_response_headers();
-                    print_new_settings_object();
-                
-                } else {
-                    printf("Changes discarded.\n");
-                }
-
-            }else if(strcmp(buf, "exit") == 0){
-                gpio_put(ACTIVITY_PIN, 1);
-                printf("Retured to normal operation\n\n\n");
-                cancel_repeating_timer(&power_pin_timer);
+            // Wait for USB terminal connection
+            int nvs_timout_value = 30;
+            int nvs_timout_counter = 0;
+            while (!stdio_usb_connected() && nvs_timout_counter < nvs_timout_value) {
                 sleep_ms(100);
-                gpio_put(MASTER_POWER_PIN, save_is_cam_on_in_nvs);
-                goto main_loop;
+                nvs_timout_counter++;
+            }
 
-            }else if (strcmp(buf, "update") == 0) {
-                gpio_put(ACTIVITY_PIN, 1);
-                printf("Rebooting into bootloader...\n");
-                sleep_ms(500);
-                reset_usb_boot(0, 0);
-            }else if (strcmp(buf, "default") == 0){
-                gpio_put(ACTIVITY_PIN, 1);
-                printf("Write default Settings? (y/n) ");
+            if(nvs_timout_counter >= nvs_timout_value){
+                cancel_repeating_timer(&power_pin_timer);
+                gpio_put(MASTER_POWER_PIN, save_is_cam_on_in_nvs);
+                state = MAIN_LOOP;
+                break;
+
+            }
+
+            printf("\nYou have entered config mode.\nIf this was unintentional: wait a few seconds, then unplug\n");      
+            sleep_ms(20);
+
+            //init nvs
+            Settings::nvs_init();
+            
+            //check for vaild settings
+            Settings::getMAGIC(&new_settings.magic_v);
+            if(new_settings.magic_v == SETTINGS_MAGIC){
+                printf("Found valid settings.\n");
+                sleep_ms(20);
+                //settings valid
+                Settings::getCH1_ADDR(&new_settings.addr1_v);
+                Settings::getCH2_ADDR(&new_settings.addr2_v);
+                Settings::getCH1_B_ID(&new_settings.ch1_b_id);
+                Settings::getCH2_B_ID(&new_settings.ch2_b_id);
+                Settings::getBAUD_RATE(&new_settings.baud_v);
+            
+            }else{
+                printf("No valid settings found...\nWriting defaults\n");
+                sleep_ms(20);
+                //write default settings
+                Settings::setCH1_ADDR(default_settings.addr1_v);
+                Settings::setCH2_ADDR(default_settings.addr2_v);
+                Settings::setCH1_B_ID(default_settings.ch1_b_id);
+                Settings::setCH2_B_ID(default_settings.ch2_b_id);
+                Settings::setBAUD_RATE(default_settings.baud_v);
+                Settings::setMAGIC(default_settings.magic_v);
+                Settings::commit();
+
+                new_settings = default_settings;
+                
+            }
+            set_response_headers();
+            print_new_settings_object();
+
+            gpio_put(ACTIVITY_PIN, 0);
+                    
+            char buf[64];
+            
+            while (1) {
+                printf("Commands: 'list', 'edit', 'default', 'update', 'exit'\n>>> ");
                 fgets(buf, sizeof(buf), stdin);
                 clear_newline(buf);
-                if (strcmp(buf, "y") == 0 || strcmp(buf, "Y") == 0) {
-                    printf("y\n");
-                    sleep_ms(1000);
-                    //write default settings
-                    Settings::setCH1_ADDR(default_settings.addr1_v);
-                    Settings::setCH2_ADDR(default_settings.addr2_v);
-                    Settings::setCH1_B_ID(default_settings.ch1_b_id);
-                    Settings::setCH2_B_ID(default_settings.ch2_b_id);
-                    Settings::setBAUD_RATE(default_settings.baud_v);
-                    Settings::setMAGIC(default_settings.magic_v);
-                    Settings::commit();
-                    set_response_headers();
-                    new_settings = default_settings;
-                    printf("Success!\n");
+
+                if (strcmp(buf, "edit") == 0) {
+                    gpio_put(ACTIVITY_PIN, 1);
+                    settings_object temp = new_settings;
+                    printf("edit\n");
+
+                    //note: use isdigit() to sanitize
+
+                    printf("    Send 'x' to skip changing an entry\n\n");
+
+                    printf("    Enter new CH1_ID (1-7): ");
+                    fgets(buf, sizeof(buf), stdin);
+                    if(buf[0] != 'x'){
+                        temp.addr1_v = atoi(buf);
+                        temp.addr1_v = (temp.addr1_v & 0x07) | 0x80;
+                        if(temp.addr1_v == 0x80) temp.addr1_v = 0x81;
+                    }
+                    printf("%d\n", (temp.addr1_v & 0x0f));
+
+
+                    printf("    Enter new CH2_ID (1-7): ");
+                    fgets(buf, sizeof(buf), stdin);
+                    if(buf[0] != 'x'){
+                        temp.addr2_v = atoi(buf);
+                        temp.addr2_v = (temp.addr2_v & 0x07) | 0x80;
+                        if(temp.addr2_v == 0x80) temp.addr2_v = 0x82;
+                    }
+                    printf("%d\n", (temp.addr2_v & 0x0f));
+
+                    printf("    Enter new CH1 broadcast ID (0 or 8): ");
+                    fgets(buf, sizeof(buf), stdin);
+                    if(buf[0] != 'x'){
+                        temp.ch1_b_id = atoi(buf);
+                        temp.ch1_b_id = (temp.ch1_b_id & 0x08) | 0x80;
+                    }
+                    printf("%d\n", (temp.ch1_b_id & 0x0f));
+                    
+                    printf("    Enter new CH2 broadcast ID (0 or 8): ");
+                    fgets(buf, sizeof(buf), stdin);
+                    if(buf[0] != 'x'){
+                        temp.ch2_b_id = atoi(buf);
+                        temp.ch2_b_id = (temp.ch2_b_id & 0x08) | 0x80;
+                    }
+                    printf("%d\n", (temp.ch2_b_id & 0x0f));
+
+                    printf("    Baud rate can be anything from 300 to 115200.\n");
+                    printf("    Enter new Baud rate: ");
+                    fgets(buf, sizeof(buf), stdin);
+                    
+                    if(buf[0] != 'x'){
+                        temp.baud_v = atoi(buf);
+                    }
+                    if(!isdigit(buf[0])){
+                        printf("Must be numbers only. Using default (9600).\n");
+                        temp.baud_v = 9600;
+                    }
+                    if(temp.baud_v < 300) temp.baud_v = 300;
+                    if(temp.baud_v > 115200) temp.baud_v = 115200;
+                    printf("%d\n", temp.baud_v);
+
+                    temp.magic_v = SETTINGS_MAGIC;
+
+                    printf("    Save these settings? (y/n): ");
+                    fgets(buf, sizeof(buf), stdin);
+                    clear_newline(buf);
+
+                    if (strcmp(buf, "y") == 0 || strcmp(buf, "Y") == 0) {
+
+                        Settings::setCH1_ADDR(temp.addr1_v);
+                        Settings::setCH2_ADDR(temp.addr2_v);
+                        Settings::setCH1_B_ID(temp.ch1_b_id);
+                        Settings::setCH2_B_ID(temp.ch2_b_id);
+                        Settings::setBAUD_RATE(temp.baud_v);
+                        Settings::setMAGIC(temp.magic_v);
+                        sleep_ms(1000);
+
+                        if(Settings::commit() == NVS_OK){
+                            printf("y\n        Changes saved!\n");
+                        }
+                        else{
+                            printf("     Internal Error: write to flash failed.\n    Changes will not survive reboot.\n");
+                        }
+                        new_settings = temp;
+                        set_response_headers();
+                        print_new_settings_object();
+                    
+                    } else {
+                        printf("Changes discarded.\n");
+                    }
+
+                }else if(strcmp(buf, "exit") == 0){
+                    gpio_put(ACTIVITY_PIN, 1);
+                    printf("Retured to normal operation\n\n\n");
+                    cancel_repeating_timer(&power_pin_timer);
+                    sleep_ms(100);
+                    gpio_put(MASTER_POWER_PIN, save_is_cam_on_in_nvs);
+                    state = INIT;
+                    break;
+
+                }else if (strcmp(buf, "update") == 0) {
+                    gpio_put(ACTIVITY_PIN, 1);
+                    printf("Rebooting into bootloader...\n");
+                    sleep_ms(500);
+                    reset_usb_boot(0, 0);
+                }else if (strcmp(buf, "default") == 0){
+                    gpio_put(ACTIVITY_PIN, 1);
+                    printf("Write default Settings? (y/n) ");
+                    fgets(buf, sizeof(buf), stdin);
+                    clear_newline(buf);
+                    if (strcmp(buf, "y") == 0 || strcmp(buf, "Y") == 0) {
+                        printf("y\n");
+                        sleep_ms(20);
+                        //write default settings
+                        Settings::setCH1_ADDR(default_settings.addr1_v);
+                        Settings::setCH2_ADDR(default_settings.addr2_v);
+                        Settings::setCH1_B_ID(default_settings.ch1_b_id);
+                        Settings::setCH2_B_ID(default_settings.ch2_b_id);
+                        Settings::setBAUD_RATE(default_settings.baud_v);
+                        Settings::setMAGIC(default_settings.magic_v);
+                        Settings::commit();
+                        set_response_headers();
+                        new_settings = default_settings;
+                        printf("Success!\n");
+                        // print_new_settings_object();
+                        sleep_ms(1000);
+                        printf("Applying settings and returning to normal Operation...\n");
+                        cancel_repeating_timer(&power_pin_timer);
+                        state = INIT;
+                        break;
+
+                    }else{
+                        printf("\n\nAborting operation\n\n");
+                    }
+                
+                }else if(strcmp(buf, "list") == 0){
+                    gpio_put(ACTIVITY_PIN, 1);
                     print_new_settings_object();
 
                 }else{
-                    printf("\n\nAborting operation\n\n");
+                    gpio_put(ACTIVITY_PIN, 1);
+                    printf("Unknown command.\nSend COMMAND<lf><cr>\n");
                 }
-            
-            }else if(strcmp(buf, "list") == 0){
-                gpio_put(ACTIVITY_PIN, 1);
-                print_new_settings_object();
 
-            }else{
-                gpio_put(ACTIVITY_PIN, 1);
-                printf("Unknown command.\nSend COMMAND<lf><cr>\n");
+                gpio_put(ACTIVITY_PIN, 0);
+
             }
 
-            gpio_put(ACTIVITY_PIN, 0);
-
+                    
+            break;
         }
 
-    }
+        default:{
+            printf("Something when wrong...\n");
 
-    printf("Fatal error. Reboot system.\n");
+            break;
+        }
+       
+        }
+
+    }    
+
+    printf("Fatal error. Reboot system imediately.\n");
 
     pwm_start(ACTIVITY_PIN, 8, 50);
 
@@ -1181,6 +1183,13 @@ void clear_all_inputs_and_outputs(){
     while (!pio_sm_is_rx_fifo_empty(pio, 2)) {
         pio_sm_get(pio, 2);
     }
+
+}
+
+
+void update_pio_clock(PIO pio, uint sm, uint baud){
+    float clkdiv = clock_get_hz(clk_sys) / (baud * 8);
+    pio_sm_set_clkdiv(pio, sm, clkdiv);
 
 }
 
