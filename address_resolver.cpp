@@ -1,13 +1,16 @@
 /*
 
+In development.
+
 UART address resolver v1.1 with debug printfs
 
 Accepts baud rates from 300 to 115200.
 
+Translates two virtual visca addresses from 0x81 to 0x87 to physical addresses of 0x81 on each camera side port.
+This allows a daisy-chain only visca camera controller to interface with homerun only cameras.
+Power switch sends hard-coded power on/off commands to cameras. 
 
 ==========Notes:==========
-
-reversed through and main!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 
 ==========To do:==========
@@ -92,7 +95,7 @@ constexpr uint ACTIVITY_PIN = 20;
 constexpr uint MASTER_POWER_PIN = 21;
 
 //Switch pins
-constexpr uint MASTER_POWER_SW = 12;   
+constexpr uint MASTER_POWER_SW = 13;   
 
 // Protocol addresses
 constexpr size_t BUFF_SIZE = 32;
@@ -281,6 +284,10 @@ int main() {
 
         case INIT:{
 
+            for(uint sm = 0; sm<4; sm++){
+                update_pio_clock(pio, sm, new_settings.baud_v);
+            }
+
             printf("Scanning for cameras...\n");
             gpio_put(MASTER_POWER_PIN, 0);
 
@@ -311,11 +318,6 @@ int main() {
                 printf("Jumping to Setting configuration.\n\n\n");
                 clear_all_inputs_and_outputs();
                 state = SET_NVS;
-            }
-
-            for(uint sm = 0; sm<4; sm++){
-
-                update_pio_clock(pio, sm, new_settings.baud_v);
             }
 
             state = MAIN_LOOP;
@@ -1192,5 +1194,6 @@ void update_pio_clock(PIO pio, uint sm, uint baud){
     pio_sm_set_clkdiv(pio, sm, clkdiv);
 
 }
+
 
 
