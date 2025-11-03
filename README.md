@@ -1,25 +1,54 @@
 # RS-232 Serial Router
 
 ## Overview
-RS-232 Visca Serial Router is a hardware and software project designed to manage and route Visca packets over RS-232 serial communications. It supports 2 device-side serial connections and allows for flexible routing between devices with fine-grained configureation.
+The **RS-232 Serial Router** is a microcontroller-based system designed to route visca packets between one camera controller and multiple cameras.It supports VISCA camera control, USB-serial interfacing (for debug and config), and flexible routing for master and slave devices.
 
-The project uses a combination of microcontroller firmware and standard RS-232 hardware, including MAX3232 level shifters and DB-9 connectors.
+It is intended to bridge the gap between daisy chain only visca controllers, and home-run only cameras.
 
 ## Features
-- Multi-port RS-232 routing
-- VISCA camera control support
-- USB-to-Serial interface support (Possable addition)
-- Signal quality monitoring and handling
+- Bi-directional routing between multiple RS-232 devices
+- VISCA camera power on/off control 
+- USB terminal interface for configuration and debugging
+- Non-volatile storage (NVS) for persistent device settings
+- Customizable UART baud rates and channel addresses
+- Real-time monitoring of received and transmitted packets
+- LED status and activity indicators for visual feedback
 
 ## Hardware
-- Microcontroller: Raspberry Pi RP2030 Module
-- RS-232 Level Shifter: MAX3232
-- Connectors: DB-9 Male/Female (controller input and pass-through), 2x RJ45 (device-side connections)
+Build your own. Needs level shifters like MAX3232.
 
-## Setup
-1. Connect cammeras to RJ45 ports and controller to female db-9 "input"
-2. Conect over USB serial to figure settings as needed:
-   - Baud rate: [Default: 9600]
-   - ID to port mapping [Default: 1 --> port 1, 2 --> port 2]
+## Software
+- Written in **C++** for the RP2040 microcontroller  
+- PIO UARTs and hardware UART 
+- Circular packet queue for handling asynchronous communication
+- Built-in configuration CLI for editing device settings via USB terminal
 
-2. [Set Broadcast ]
+## Default Settings
+| Parameter        | Default Value |
+|------------------|---------------|
+| CH1 ID           | 0x81          |
+| CH2 ID           | 0x82          |
+| CH1 Broadcast ID | 0x80          |
+| CH2 Broadcast ID | 0x80          |
+| Baud Rate        | 9600          |
+| Response Header  | 0x90 / 0x91   |
+
+Settings are stored in flash and verified on startup. If invalid, defaults are written automatically.
+
+## Usage
+
+- **Normal Operation:** The router automatically forwards packets between master and channels, monitors responses, and manages camera power.
+- **Settings Config Mode:** Send at least one byte over USB to enter config mode. Available commands:
+  - `list` – display current settings
+  - `edit` – modify channel IDs, broadcast IDs, and baud rate
+  - `default` – restore default settings
+  - `update` – reboot into bootloader for firmware update (when bootsel button is hidden inside a case, etc.)
+  - `exit` – return to normal operation
+
+- **Camera Power Control:** Use the master power switch to toggle all connected cameras on/off. System assums the operation succedes to avoid getting stuck.
+
+## Contribution
+
+- This project is almost complete for my purposes, but contribution is more than welcome.
+- Ensure any changes maintain compatibility with as many existing protocol variations and as possible.
+
